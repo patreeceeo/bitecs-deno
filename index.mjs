@@ -268,17 +268,12 @@ var SparseSet = () => {
       sparse[swapped] = index;
     }
   };
-  const reset = () => {
-    dense.length = 0;
-    sparse.length = 0;
-  };
   return {
     add,
     remove,
     has,
     sparse,
-    dense,
-    reset
+    dense
   };
 };
 
@@ -297,7 +292,7 @@ var not = (fn) => (v) => !fn(v);
 var storeFlattened = (c) => c[$storeFlattened];
 var isFullComponent = storeFlattened;
 var isProperty = not(isFullComponent);
-var isModifier = (c) => typeof c === "function" && c[$modifier];
+var isModifier = (c) => typeof c === "function";
 var isNotModifier = not(isModifier);
 var isChangedModifier = (c) => isModifier(c) && c()[1] === "changed";
 var isWorld = (w) => Object.getOwnPropertySymbols(w).includes($componentMap);
@@ -558,9 +553,9 @@ var $removedEntities = Symbol("removedEntities");
 var defaultSize = 1e5;
 var globalEntityCursor = 0;
 var globalSize = defaultSize;
+var resizeThreshold = () => globalSize - globalSize / 5;
 var getGlobalSize = () => globalSize;
 var removed = [];
-var recycled = [];
 var defaultRemovedReuseThreshold = 0.01;
 var removedReuseThreshold = defaultRemovedReuseThreshold;
 var resetGlobals = () => {
@@ -568,7 +563,6 @@ var resetGlobals = () => {
   globalEntityCursor = 0;
   removedReuseThreshold = defaultRemovedReuseThreshold;
   removed.length = 0;
-  recycled.length = 0;
 };
 var setDefaultSize = (newSize) => {
   const oldSize = globalSize;
@@ -585,17 +579,13 @@ var setRemovedRecycleThreshold = (newThreshold) => {
 };
 var getEntityCursor = () => globalEntityCursor;
 var eidToWorld = /* @__PURE__ */ new Map();
-var flushRemovedEntities = (world) => {
-  if (!world[$manualEntityRecycling]) {
-    throw new Error("bitECS - cannot flush removed entities, enable feature with the enableManualEntityRecycling function");
-  }
-  removed.push(...recycled);
-  recycled.length = 0;
-};
 var addEntity = (world) => {
-  const eid = world[$manualEntityRecycling] ? removed.length ? removed.shift() : globalEntityCursor++ : removed.length > Math.round(globalSize * removedReuseThreshold) ? removed.shift() : globalEntityCursor++;
-  if (eid > world[$size])
-    throw new Error("bitECS - max entities reached");
+  if (globalEntityCursor >= resizeThreshold()) {
+    const size = globalSize;
+    const amount = Math.ceil(size / 2 / 4) * 4;
+    setDefaultSize(size + amount);
+  }
+  const eid = removed.length > Math.round(defaultSize * removedReuseThreshold) ? removed.shift() : globalEntityCursor++;
   world[$entitySparseSet].add(eid);
   eidToWorld.set(eid, world);
   world[$notQueries].forEach((q) => {
@@ -612,10 +602,7 @@ var removeEntity = (world, eid) => {
   world[$queries].forEach((q) => {
     queryRemoveEntity(world, q, eid);
   });
-  if (world[$manualEntityRecycling])
-    recycled.push(eid);
-  else
-    removed.push(eid);
+  removed.push(eid);
   world[$entitySparseSet].remove(eid);
   world[$entityComponents].delete(eid);
   world[$localEntities].delete(world[$localEntityLookup].get(eid));
@@ -633,14 +620,12 @@ var getEntityComponents = (world, eid) => {
 var entityExists = (world, eid) => world[$entitySparseSet].has(eid);
 
 // src/Query.js
-var $modifier = Symbol("$modifier");
-function modifier(c, mod) {
-  const inner = () => [c, mod];
-  inner[$modifier] = true;
-  return inner;
+function Not(c) {
+  return () => [c, "not"];
 }
-var Not = (c) => modifier(c, "not");
-var Changed = (c) => modifier(c, "changed");
+function Changed(c) {
+  return () => [c, "changed"];
+}
 function Any(...comps) {
   return function QueryAny() {
     return comps;
@@ -666,37 +651,28 @@ var $dirtyQueries = Symbol("$dirtyQueries");
 var $queryComponents = Symbol("queryComponents");
 var $enterQuery = Symbol("enterQuery");
 var $exitQuery = Symbol("exitQuery");
-var empty = Object.freeze([]);
 var enterQuery = (query) => (world) => {
   if (!world[$queryMap].has(query))
     registerQuery(world, query);
   const q = world[$queryMap].get(query);
-  if (q.entered.dense.length === 0) {
-    return empty;
-  } else {
-    const results = q.entered.dense.slice();
-    q.entered.reset();
-    return results;
-  }
+  const entered = q.entered.dense.slice();
+  q.entered = SparseSet();
+  return entered;
 };
 var exitQuery = (query) => (world) => {
   if (!world[$queryMap].has(query))
     registerQuery(world, query);
   const q = world[$queryMap].get(query);
-  if (q.exited.dense.length === 0) {
-    return empty;
-  } else {
-    const results = q.exited.dense.slice();
-    q.exited.reset();
-    return results;
-  }
+  const exited = q.exited.dense.slice();
+  q.exited = SparseSet();
+  return exited;
 };
 var registerQuery = (world, query) => {
   const components2 = [];
   const notComponents = [];
   const changedComponents = [];
   query[$queryComponents].forEach((c) => {
-    if (typeof c === "function" && c[$modifier]) {
+    if (typeof c === "function") {
       const [comp, mod] = c();
       if (!world[$componentMap].has(comp))
         registerComponent(world, comp);
@@ -927,6 +903,9 @@ var registerComponent = (world, component) => {
     notQueries,
     changedQueries
   });
+  if (component[$storeSize] < getGlobalSize()) {
+    resizeStore(component, getGlobalSize());
+  }
   incrementBitflag(world);
 };
 var registerComponents = (world, components2) => {
@@ -1002,7 +981,6 @@ var $bitflag = Symbol("bitflag");
 var $archetypes = Symbol("archetypes");
 var $localEntities = Symbol("localEntities");
 var $localEntityLookup = Symbol("localEntityLookup");
-var $manualEntityRecycling = Symbol("manualEntityRecycling");
 var worlds = [];
 var resizeWorlds = (size) => {
   worlds.forEach((world) => {
@@ -1021,9 +999,6 @@ var createWorld = (...args) => {
   worlds.push(world);
   return world;
 };
-var enableManualEntityRecycling = (world) => {
-  world[$manualEntityRecycling] = true;
-};
 var resetWorld = (world, size = getGlobalSize()) => {
   world[$size] = size;
   if (world[$entityArray])
@@ -1041,7 +1016,6 @@ var resetWorld = (world, size = getGlobalSize()) => {
   world[$dirtyQueries] = /* @__PURE__ */ new Set();
   world[$localEntities] = /* @__PURE__ */ new Map();
   world[$localEntityLookup] = /* @__PURE__ */ new Map();
-  world[$manualEntityRecycling] = false;
   return world;
 };
 var deleteWorld = (world) => {
@@ -1087,11 +1061,9 @@ export {
   defineSerializer,
   defineSystem,
   deleteWorld,
-  enableManualEntityRecycling,
   enterQuery,
   entityExists,
   exitQuery,
-  flushRemovedEntities,
   getAllEntities,
   getEntityComponents,
   getWorldComponents,
@@ -1104,7 +1076,6 @@ export {
   removeEntity,
   removeQuery,
   resetChangedQuery,
-  resetGlobals,
   resetWorld,
   setDefaultSize,
   setRemovedRecycleThreshold
